@@ -249,6 +249,32 @@ pub fn derive_entity(ctx: Context, id: EntityId, derived_name: []const u8) !void
                 }
             }
         },
+        .@"enum" => {
+            const name = db.attrs.name.get(id);
+            const field_id = try db.get_entity_id_by_name("type.field", derived_name);
+            log.warn("derived: {s} is field: {}", .{ derived_name, field_id });
+
+            // actual enum valued used by `derived_name`
+            const target_enum_id = db.attrs.@"enum".get(field_id) orelse return error.DerivedReferenceIsNotEnum;
+
+            if (ctx.derived_entities.contains(target_enum_id)) {
+                log.warn("TODO: chained enum derivation: {?s}", .{name});
+                return error.TodoChainedDerivation;
+            }
+
+            // replace all references to this enum (field_id) with the
+            // target enum (target_enum_id)
+            // probably a `zig` way to do this?
+            for (db.attrs.@"enum".keys()) |field_owner_id| {
+                if (db.attrs.@"enum".get(field_owner_id) == id) {
+                    try db.attrs.@"enum".put(db.gpa, field_owner_id, target_enum_id);
+                }
+            }
+
+            db.destroy_entity(id);
+
+            //try db.attrs.@"enum".putNoClobber(db.gpa, parent_id, field_id);
+        },
         else => {
             log.warn("TODO: implement derivation for {?}", .{entity_type});
         },
@@ -502,6 +528,9 @@ fn load_enumerated_values(ctx: *Context, node: xml.Node, field_id: EntityId) !vo
     errdefer db.destroy_entity(id);
 
     try db.attrs.@"enum".putNoClobber(db.gpa, field_id, id);
+
+    if (node.get_attribute("derivedFrom")) |derived_from|
+        try ctx.add_derived_entity(id, derived_from);
 
     var value_it = node.iterate(&.{}, "enumeratedValue");
     while (value_it.next()) |value_node|
