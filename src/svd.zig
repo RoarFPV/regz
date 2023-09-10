@@ -251,11 +251,11 @@ pub fn derive_entity(ctx: Context, id: EntityId, derived_name: []const u8) !void
         },
         .@"enum" => {
             const name = db.attrs.name.get(id);
-            const field_id = try db.get_entity_id_by_name("type.field", derived_name);
-            log.warn("derived: {s} is field: {}", .{ derived_name, field_id });
+            const target_enum_id = try db.get_entity_id_by_name("type.enum", derived_name);
+            log.warn("derived: {s} is field: {}", .{ derived_name, target_enum_id });
 
             // actual enum valued used by `derived_name`
-            const target_enum_id = db.attrs.@"enum".get(field_id) orelse return error.DerivedReferenceIsNotEnum;
+            // const target_enum_id = db.attrs.@"enum".get(field_id) orelse return error.DerivedReferenceIsNotEnum;
 
             if (ctx.derived_entities.contains(target_enum_id)) {
                 log.warn("TODO: chained enum derivation: {?s}", .{name});
@@ -288,7 +288,7 @@ pub fn load_peripheral(ctx: *Context, node: xml.Node, device_id: EntityId) !void
     errdefer db.destroy_entity(type_id);
 
     const instance_id = try db.create_peripheral_instance(device_id, type_id, .{
-        .name = node.get_value("name") orelse return error.PeripheralMissingName,
+        .name = try get_name_without_suffix(node, "[%s]"),
         .offset = if (node.get_value("baseAddress")) |base_address|
             try std.fmt.parseInt(u64, base_address, 0)
         else
@@ -353,7 +353,7 @@ fn load_peripheral_type(ctx: *Context, node: xml.Node) !EntityId {
 
     // TODO: get version
     const id = try db.create_peripheral(.{
-        .name = node.get_value("name") orelse return error.PeripheralMissingName,
+        .name = try get_name_without_suffix(node, "[%s]"),
     });
     errdefer db.destroy_entity(id);
 
@@ -485,7 +485,7 @@ fn load_field(ctx: *Context, node: xml.Node, register_id: EntityId) !void {
     } else null;
 
     const id = try db.create_field(register_id, .{
-        .name = try get_name_without_suffix(node, "%s"),
+        .name = try get_name_without_suffix(node, "[%s]"),
         .description = node.get_value("description"),
         .size = bit_range.width,
         .offset = bit_range.offset,
@@ -520,9 +520,11 @@ fn load_enumerated_values(ctx: *Context, node: xml.Node, field_id: EntityId) !vo
         } else return error.NoPeripheralFound;
     };
 
+    log.debug("{}: creating enum: {?s}", .{ field_id, node.get_value("name") });
+
     const id = try db.create_enum(peripheral_id, .{
         // TODO: find solution to potential name collisions for enums at the peripheral level.
-        //.name = node.get_value("name"),
+        .name = node.get_value("name"),
         .size = db.attrs.size.get(field_id),
     });
     errdefer db.destroy_entity(id);

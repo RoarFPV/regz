@@ -37,19 +37,39 @@ pub fn to_zig(db: Database, out_writer: anytype) !void {
         \\const mmio = micro.mmio;
         \\
     );
+
+    try writer.writeAll(
+        \\
+        \\ fn Peripheral(comptime addr: u32, comptime PType: type) *volatile PType {
+        \\     return @as(*volatile PType, @ptrFromInt(addr));
+        \\    }
+        \\
+    );
+
     try write_devices(db, writer);
     try write_types(db, writer);
     try writer.writeByte(0);
 
     // format the generated code
-    var ast = try std.zig.Ast.parse(db.gpa, @as([:0]const u8, @ptrCast(buffer.items[0 .. buffer.items.len - 1])), .zig);
-    defer ast.deinit(db.gpa);
 
-    // TODO: ast check?
-    const text = try ast.render(db.gpa);
-    defer db.gpa.free(text);
+    const gen_source = @as([:0]const u8, @ptrCast(buffer.items[0 .. buffer.items.len - 1]));
 
-    try out_writer.writeAll(text);
+    try out_writer.print("//======= GEN_SOURCE\n", .{});
+
+    try out_writer.writeAll(gen_source);
+
+    try out_writer.print("\n//======= GEN_SOURCE\n", .{});
+
+    //try out_writer.flush();
+
+    // var ast = try std.zig.Ast.parse(db.gpa, gen_source, .zig);
+    // defer ast.deinit(db.gpa);
+
+    // // TODO: ast check?
+    // const text = try ast.render(db.gpa);
+    // defer db.gpa.free(text);
+
+    // try out_writer.writeAll(text);
 }
 
 fn write_devices(db: Database, writer: anytype) !void {
@@ -262,11 +282,11 @@ fn write_peripheral_instance(db: Database, instance_id: EntityId, offset: u64, o
     else
         "";
 
-    try writer.print("pub const {s} = @as(*volatile {s}{s}, @ptrFromInt(0x{x}));\n", .{
+    try writer.print("pub const {s} = Peripheral(0x{x}, {s}{s});\n", .{
         std.zig.fmtId(name),
+        offset,
         array_prefix,
         type_ref,
-        offset,
     });
 
     try out_writer.writeAll(buffer.items);
@@ -431,6 +451,9 @@ fn write_enum(db: Database, enum_id: EntityId, out_writer: anytype) !void {
     const name = db.attrs.name.get(enum_id) orelse return;
     const size = db.attrs.size.get(enum_id) orelse return error.MissingEnumSize;
 
+    const field_set = db.children.enum_fields.get(enum_id) orelse return;
+    _ = field_set;
+
     // TODO: handle this instead of assert
     // assert(std.math.ceilPowerOfTwo(field_set.count()) <= size);
 
@@ -453,7 +476,10 @@ fn write_enum_fields(db: Database, enum_id: u32, out_writer: anytype) !void {
 
     const writer = buffer.writer();
     const size = db.attrs.size.get(enum_id) orelse return error.MissingEnumSize;
-    const field_set = db.children.enum_fields.get(enum_id) orelse return error.MissingEnumFields;
+    const field_set = db.children.enum_fields.get(enum_id) orelse {
+        log.err("enum: {} missing fields", .{enum_id});
+        return error.MissingEnumFields;
+    };
     for (field_set.keys()) |enum_field_id|
         try write_enum_field(db, enum_field_id, size, writer);
 
@@ -646,8 +672,11 @@ fn write_registers_base(
         };
 
         try write_register(db, next.id, writer);
+
         // TODO: round up to next power of two
-        assert(next.size % 8 == 0);
+        if (next.size % 8 != 0) {
+            log.err("{}@0x{x}: size of {} is not byte aligned", .{ next.id, next.offset, next.size });
+        }
         offset += next.size / 8;
         i = end;
     }
@@ -732,7 +761,7 @@ fn write_fields(
     var i: u32 = 0;
     while (i < fields.len and offset < register_size) {
         if (offset < fields[i].offset) {
-            try writer.print("reserved{}: u{},\n", .{ fields[i].offset, fields[i].offset - offset });
+            try writer.print("reserved{}: u{} = 0,\n", .{ fields[i].offset, fields[i].offset - offset });
             offset = fields[i].offset;
         } else if (offset > fields[i].offset) {
             if (db.attrs.name.get(fields[i].id)) |name|
@@ -785,49 +814,43 @@ fn write_fields(
             try write_comment(db.arena.allocator(), description, writer);
 
         if (db.attrs.count.get(fields[i].id)) |count| {
-            if (db.attrs.@"enum".contains(fields[i].id))
-                log.warn("TODO: field array with enums", .{});
+            if (db.attrs.@"enum".get(fields[i].id)) |enums|
+                log.warn("TODO: field array {} with enums: {}", .{ fields[i].id, enums });
 
-            try writer.print("{s}: packed struct(u{}) {{ ", .{
+            try writer.print("{s}: [{}]u{},", .{
                 std.zig.fmtId(name),
-                next.size,
+                count,
+                next.size / count,
             });
 
-            var j: u32 = 0;
-            while (j < count) : (j += 1) {
-                if (j > 0)
-                    try writer.writeAll(", ");
+            // var j: u32 = 0;
+            // while (j < count) : (j += 1) {
+            //     if (j > 0)
+            //         try writer.writeAll(", ");
 
-                try writer.print("u{}", .{next.size / count});
-            }
+            //     try writer.print("u{}", .{next.size / count});
+            // }
 
-            try writer.writeAll(" },\n");
+            //try writer.writeAll(" },\n");
         } else if (db.attrs.@"enum".get(fields[i].id)) |enum_id| {
             if (db.attrs.name.get(enum_id)) |enum_name| {
                 try writer.print(
-                    \\{s}: packed union {{
-                    \\    raw: u{},
-                    \\    value: {s},
-                    \\}},
+                    \\{s}: {s},
                     \\
                 , .{
                     std.zig.fmtId(name),
-                    next.size,
                     std.zig.fmtId(enum_name),
                 });
             } else {
                 try writer.print(
-                    \\{s}: packed union {{
-                    \\    raw: u{},
-                    \\    value: enum(u{}) {{
+                    \\{s}: enum(u{}) {{
                     \\
                 , .{
                     std.zig.fmtId(name),
                     next.size,
-                    next.size,
                 });
                 try write_enum_fields(db, enum_id, writer);
-                try writer.writeAll("},\n},\n");
+                try writer.writeAll("},\n");
             }
         } else {
             try writer.print("{s}: u{},\n", .{ name, next.size });
@@ -839,7 +862,7 @@ fn write_fields(
 
     assert(offset <= register_size);
     if (offset < register_size)
-        try writer.print("padding: u{},\n", .{register_size - offset});
+        try writer.print("padding: u{}=0,\n", .{register_size - offset});
 
     try out_writer.writeAll(buffer.items);
 }
@@ -951,7 +974,7 @@ test "gen.peripherals with a shared type" {
         \\        pub const TEST_PERIPHERAL = extern struct {
         \\            TEST_REGISTER: mmio.Mmio(packed struct(u32) {
         \\                TEST_FIELD: u1,
-        \\                padding: u31,
+        \\                padding: u31=0,
         \\            }),
         \\        };
         \\    };
@@ -1003,14 +1026,14 @@ test "gen.peripheral with modes" {
         \\                TEST_REGISTER1: u32,
         \\                COMMON_REGISTER: mmio.Mmio(packed struct(u32) {
         \\                    TEST_FIELD: u1,
-        \\                    padding: u31,
+        \\                    padding: u31=0,
         \\                }),
         \\            },
         \\            TEST_MODE2: extern struct {
         \\                TEST_REGISTER2: u32,
         \\                COMMON_REGISTER: mmio.Mmio(packed struct(u32) {
         \\                    TEST_FIELD: u1,
-        \\                    padding: u31,
+        \\                    padding: u31=0,
         \\                }),
         \\            },
         \\        };
@@ -1103,7 +1126,7 @@ test "gen.field with named enum" {
         \\                    raw: u4,
         \\                    value: TEST_ENUM,
         \\                },
-        \\                padding: u4,
+        \\                padding: u4=0,
         \\            }),
         \\        };
         \\    };
@@ -1136,7 +1159,7 @@ test "gen.field with anonymous enum" {
         \\                        _,
         \\                    },
         \\                },
-        \\                padding: u4,
+        \\                padding: u4=0,
         \\            }),
         \\        };
         \\    };
@@ -1160,8 +1183,8 @@ test "gen.namespaced register groups" {
         \\pub const devices = struct {
         \\    pub const ATmega328P = struct {
         \\        pub const peripherals = struct {
-        \\            pub const PORTB = @as(*volatile types.peripherals.PORT.PORTB, @ptrFromInt(0x23));
-        \\            pub const PORTC = @as(*volatile types.peripherals.PORT.PORTC, @ptrFromInt(0x26));
+        \\            pub const PORTB = Peripheral(0x23, types.peripherals.PORTB);
+        \\            pub const PORTC = Peripheral(0x26, types.peripherals.PORTC);
         \\        };
         \\    };
         \\};
@@ -1202,7 +1225,7 @@ test "gen.peripheral with reserved register" {
         \\pub const devices = struct {
         \\    pub const ATmega328P = struct {
         \\        pub const peripherals = struct {
-        \\            pub const PORTB = @as(*volatile types.peripherals.PORTB, @ptrFromInt(0x23));
+        \\            pub const PORTB = Peripheral(0x23, types.peripherals.PORTB);
         \\        };
         \\    };
         \\};
@@ -1235,7 +1258,7 @@ test "gen.peripheral with count" {
         \\pub const devices = struct {
         \\    pub const ATmega328P = struct {
         \\        pub const peripherals = struct {
-        \\            pub const PORTB = @as(*volatile [4]types.peripherals.PORTB, @ptrFromInt(0x23));
+        \\            pub const PORTB = Peripheral(0x23, types.peripherals.PORTB);
         \\        };
         \\    };
         \\};
@@ -1268,7 +1291,7 @@ test "gen.peripheral with count, padding required" {
         \\pub const devices = struct {
         \\    pub const ATmega328P = struct {
         \\        pub const peripherals = struct {
-        \\            pub const PORTB = @as(*volatile [4]types.peripherals.PORTB, @ptrFromInt(0x23));
+        \\            pub const PORTB = Peripheral(0x23, types.peripherals.PORTB);
         \\        };
         \\    };
         \\};
@@ -1302,7 +1325,7 @@ test "gen.register with count" {
         \\pub const devices = struct {
         \\    pub const ATmega328P = struct {
         \\        pub const peripherals = struct {
-        \\            pub const PORTB = @as(*volatile types.peripherals.PORTB, @ptrFromInt(0x23));
+        \\            pub const PORTB = Peripheral(0x23, types.peripherals.PORTB);
         \\        };
         \\    };
         \\};
@@ -1335,7 +1358,7 @@ test "gen.register with count and fields" {
         \\pub const devices = struct {
         \\    pub const ATmega328P = struct {
         \\        pub const peripherals = struct {
-        \\            pub const PORTB = @as(*volatile types.peripherals.PORTB, @ptrFromInt(0x23));
+        \\            pub const PORTB = Peripheral(0x23, types.peripherals.PORTB);
         \\        };
         \\    };
         \\};
@@ -1345,7 +1368,7 @@ test "gen.register with count and fields" {
         \\        pub const PORTB = extern struct {
         \\            PORTB: [4]mmio.Mmio(packed struct(u8) {
         \\                TEST_FIELD: u4,
-        \\                padding: u4,
+        \\                padding: u4=0,
         \\            }),
         \\            DDRB: u8,
         \\            PINB: u8,
@@ -1372,9 +1395,9 @@ test "gen.field with count, width of one, offset, and padding" {
         \\    pub const peripherals = struct {
         \\        pub const PORTB = extern struct {
         \\            PORTB: mmio.Mmio(packed struct(u8) {
-        \\                reserved2: u2,
+        \\                reserved2: u2=0,
         \\                TEST_FIELD: packed struct(u5) { u1, u1, u1, u1, u1 },
-        \\                padding: u1,
+        \\                padding: u1=0,
         \\            }),
         \\        };
         \\    };
@@ -1399,9 +1422,9 @@ test "gen.field with count, multi-bit width, offset, and padding" {
         \\    pub const peripherals = struct {
         \\        pub const PORTB = extern struct {
         \\            PORTB: mmio.Mmio(packed struct(u8) {
-        \\                reserved2: u2,
+        \\                reserved2: u2=0,
         \\                TEST_FIELD: packed struct(u4) { u2, u2 },
-        \\                padding: u2,
+        \\                padding: u2=0,
         \\            }),
         \\        };
         \\    };

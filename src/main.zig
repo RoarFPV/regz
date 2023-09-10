@@ -135,16 +135,16 @@ fn main_impl() anyerror!void {
     else
         std.io.getStdOut().writer();
 
-    var buffered = std.io.bufferedWriter(raw_writer);
+    var buffered = raw_writer; //.io.bufferedWriter(raw_writer);
     if (res.args.json != 0)
         try db.json_stringify(
             .{ .whitespace = .indent_2 },
-            buffered.writer(),
+            buffered,
         )
     else
-        try db.to_zig(buffered.writer());
+        try db.to_zig(buffered);
 
-    try buffered.flush();
+    //try buffered.flush();
 }
 
 fn read_fn(ctx: ?*anyopaque, buffer: ?[*]u8, len: c_int) callconv(.C) c_int {
